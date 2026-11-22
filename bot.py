@@ -15,6 +15,9 @@ FEEDS = [
     ("https://www.animenewsnetwork.com/all/rss.xml", True, None),
     ("https://myanimelist.net/rss/news.xml", True, None),
     ("https://animecorner.me/feed/", True, None),
+    ("https://animecorner.me/tag/one-piece/feed/", True, None),
+    ("https://cr-news-api-service.prd.crunchyroll.com/v1/en-US/rss", True, None),
+    ("https://www.cbr.com/feed/", True, None),
     (GN + "%22One+Piece%22+chapter+when:7d", True, None),
     (GN + "%22One+Piece%22+episode+when:7d", True, None),
     (GN + "%22One+Piece%22+volume+when:14d", True, None),
@@ -56,7 +59,7 @@ def categorize(title):
     t = title.lower()
     for i, (words, label, sp) in enumerate(CATS):
         if any(w in t for w in words):
-            return label, sp, i + 2
+            return label, sp, (7 if sp else i + 2)
     return "📰 خبر", False, 6
 
 
@@ -74,6 +77,11 @@ def load(url):
 
 
 def get_image(e):
+    if "reddit.com" in e.link:
+        raw = html.unescape(e.get("summary", ""))
+        m = re.search(r'https://(?:i|preview)\.redd\.it/[^"\s<>]+', raw)
+        if m:
+            return m.group(0)
     for key in ("media_content", "media_thumbnail"):
         if e.get(key):
             return e[key][0].get("url")
@@ -105,7 +113,7 @@ def news_item(e, force):
     title = e.title.strip()
     label, spoiler, prio = categorize(title)
     if force == "spoiler":
-        label, spoiler, prio = CATS[0][1], True, 2
+        label, spoiler, prio = CATS[0][1], True, 7
     summary = clean(e.get("summary", ""))[:250]
     if ("reddit.com" in e.link or "news.google.com" in e.link
             or summary.lower().startswith(title.lower()[:30])):
@@ -124,7 +132,7 @@ def news_item(e, force):
              + "\n\n#OnePiece #وان_پیس")
     key_t = "t:" + re.sub(r"\W+", "", title.lower())[:80]
     return {"text": text[:1000], "prio": prio, "spoiler": spoiler,
-            "e": None if spoiler else e, "keys": [e.link, key_t]}
+            "e": e, "keys": [e.link, key_t]}
 
 
 def birthday_items(now):
@@ -164,7 +172,8 @@ def send(it):
     if img:
         r = requests.post(base + "/sendPhoto", timeout=30, data={
             "chat_id": CHANNEL, "photo": img,
-            "caption": it["text"], "parse_mode": "HTML"})
+            "caption": it["text"], "parse_mode": "HTML",
+            "has_spoiler": "true" if it.get("spoiler") else "false"})
         print("TELEGRAM photo:", r.status_code, r.text[:200])
         if r.ok:
             return True
