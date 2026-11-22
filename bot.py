@@ -62,7 +62,7 @@ def categorize(title):
     return "📰 خبر", False, 6
 
 
-def fresh(e, days=3):
+def fresh(e, days=7):
     t = e.get("published_parsed") or e.get("updated_parsed")
     return (not t) or (time.time() - calendar.timegm(t) < days * 86400)
 
@@ -81,8 +81,11 @@ def is_dup(k, pool):
 def load(url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=20)
-        return feedparser.parse(r.content).entries
-    except Exception:
+        entries = feedparser.parse(r.content).entries
+        print("FEED", r.status_code, len(entries), url[:70])
+        return entries
+    except Exception as ex:
+        print("FEED ERROR", url[:70], ex)
         return []
 
 
@@ -162,6 +165,7 @@ def episode_item():
     try:
         r = requests.post("https://graphql.anilist.co", json={"query": q}, timeout=15)
         s = r.json()["data"]["Page"]["airingSchedules"][0]
+        print("ANILIST آخرین قسمت:", s["episode"])
         if time.time() - s["airingAt"] > 3 * 86400:
             return None
         ep = s["episode"]
@@ -172,7 +176,8 @@ def episode_item():
             "image": s["media"]["coverImage"]["extraLarge"],
             "keys": ["ep:%d" % ep],
         }
-    except Exception:
+    except Exception as ex:
+        print("ANILIST ERROR", ex)
         return None
 
 
@@ -203,25 +208,34 @@ if ep:
 queued = set()
 pool = [s for s in seen if s.startswith("t:")]
 for url, need_kw, force in FEEDS:
-    for e in load(url):
+    entries = load(url)
+    st = {"irrelevant": 0, "blocked_or_old": 0, "dup_or_seen": 0, "ok": 0}
+    for e in entries:
         if not e.get("title") or not e.get("link"):
             continue
         tl = e.title.lower()
+        summ = clean(e.get("summary", "")).lower()
         if force == "spoiler":
-            if "/r/onepiece/" not in e.link.lower() or not re.search(r"spoiler|chapter|\b1[0-2]\d{2}\b", tl):
-                continue
-        elif not re.search(r"one\s?piece", tl):
+            relevant = ("/r/onepiece/" in e.link.lower()
+                        and re.search(r"spoiler|chapter|\b1[0-2]\d{2}\b", tl))
+        else:
+            relevant = (re.search(r"one\s?piece", tl)
+                        or len(re.findall(r"one\s?piece", summ)) >= 2)
+        if not relevant:
+            st["irrelevant"] += 1
             continue
         if any(b in tl for b in BLOCK) or not fresh(e):
+            st["blocked_or_old"] += 1
             continue
         it = news_item(e, force)
-        if any(k in seen or k in queued for k in it["keys"]):
-            continue
-        if is_dup(it["keys"][1], pool):
+        if any(k in seen or k in queued for k in it["keys"]) or is_dup(it["keys"][1], pool):
+            st["dup_or_seen"] += 1
             continue
         queued.update(it["keys"])
         pool.append(it["keys"][1])
         items.append(it)
+        st["ok"] += 1
+    print("STAT", url[:50], st)
 
 items = [i for i in items if not any(k in seen for k in i["keys"])]
 items.sort(key=lambda x: x["prio"])
@@ -235,6 +249,7 @@ for it in items:
     tries += 1
     img = it.get("image") or (get_image(it["e"]) if it.get("e") else None)
     if REQUIRE_IMAGE and not img and it["prio"] >= 2:
+        print("بدون عکس رد شد:", it["keys"][0][:80])
         continue
     if send(it, img):
         seen.update(it["keys"])
