@@ -67,7 +67,10 @@ def fresh(e, days=3):
 
 
 def is_dup(k, pool):
+    nums = re.findall(r"\d+", k)
     for p in pool:
+        if re.findall(r"\d+", p) != nums:
+            continue
         sm = SequenceMatcher(None, k, p)
         if sm.real_quick_ratio() > 0.8 and sm.quick_ratio() > 0.8 and sm.ratio() > 0.8:
             return True
@@ -135,9 +138,9 @@ def news_item(e, force):
              + "\n\n#OnePiece #وان_پیس")
     key_t = "t:" + re.sub(r"\W+", "", title.lower())[:80]
     keys = [e.link, key_t]
-    m = re.search(r"chapter\s*(\d{3,4})", title.lower())
+    m = re.search(r"(chapter|episode|volume)\s*(\d{1,4})", title.lower())
     if m:
-        keys.append("c:%s:%s" % (m.group(1), label))
+        keys.append("n:%s%s:%s" % (m.group(1), m.group(2), label))
     return {"text": text, "prio": prio, "spoiler": spoiler, "e": e, "keys": keys}
 
 
@@ -200,6 +203,8 @@ queued = set()
 pool = [s for s in seen if s.startswith("t:")]
 for url, need_kw, force in FEEDS:
     for e in load(url):
+        if not e.get("title") or not e.get("link"):
+            continue
         tl = e.title.lower()
         if need_kw and "one piece" not in tl and "onepiece" not in tl:
             continue
