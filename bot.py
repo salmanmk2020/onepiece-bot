@@ -1,64 +1,79 @@
-import feedparser, requests, json, os, re
-from bs4 import BeautifulSoup
+if force == "spoiler":
+        label, spoiler, prio = CATS[0][1], True, 2
+    summary = clean(e.get("summary", ""))[:250]
+    if ("reddit.com" in e.link or "news.google.com" in e.link
+            or summary.lower().startswith(title.lower()[:30])):
+        summary = ""
+    t = f"<tg-spoiler>{esc(title)}</tg-spoiler>" if spoiler else f"<b>{esc(title)}</b>"
+    text = f"{label}\n\n{t}\n"
+    if summary:
+        text += f"\n{'<tg-spoiler>' + esc(summary) + '</tg-spoiler>' if spoiler else esc(summary)}\n"
+    text += (f'\n🔗 <a href="{html.escape(e.link)}">{esc(source_label(e))}</a>'
+             f"\n\n#OnePiece #وان_پیس")
+    key_t = "t:" + re.sub(r"\W+", "", title.lower())[:80]
+    return {"text": text[:1000], "prio": prio, "spoiler": spoiler,
+            "e": None if spoiler else e, "keys": [e.link, key_t]}
 
-TOKEN = os.environ["BOT_TOKEN"]
-CHANNEL = os.environ["CHANNEL_ID"]
-MAX_POSTS = 1
-KEYWORD = "one piece"
-SEEN_FILE = "seen.json"
+def birthday_items(now):
+    return [{"text": f"🎂 امروز تولد <b>{n}</b> است!\n\n#تولد_شخصیت #OnePiece #وان_پیس",
+             "prio": 0, "keys": [f"bday:{now.year}:{now.month}-{now.day}:{n}"]}
+            for n in BDAYS.get((now.month, now.day), [])]
 
-FEEDS = [
-    "https://www.animenewsnetwork.com/all/rss.xml",
-    "https://www.reddit.com/r/OnePiece/.rss",
-    "https://news.google.com/rss/search?q=%22One+Piece%22+anime&hl=en-US&gl=US&ceid=US:en",
-]
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-
-def clean(html):
-    return BeautifulSoup(html or "", "html.parser").get_text(" ", strip=True)
-
-def get_image(e):
-    for key in ("media_content", "media_thumbnail"):
-        if e.get(key):
-            return e[key][0].get("url")
-    for enc in e.get("enclosures", []):
-        if enc.get("type", "").startswith("image"):
-            return enc.get("href")
-    m = re.search(r'<img[^>]+src="([^"]+)"', e.get("summary", ""))
-    if m:
-        return m.group(1)
+def episode_item():
+    q = """query { Page(perPage:1) { airingSchedules(mediaId:21, notYetAired:false, sort:TIME_DESC) {
+           episode airingAt media { coverImage { extraLarge } } } } }"""
     try:
-        r = requests.get(e.link, headers=HEADERS, timeout=10)
-        tag = BeautifulSoup(r.text, "html.parser").find("meta", property="og:image")
-        if tag and tag.get("content"):
-            return tag["content"]
+        r = requests.post("https://graphql.anilist.co", json={"query": q}, timeout=15)
+        s = r.json()["data"]["Page"]["airingSchedules"][0]
+        if time.time() - s["airingAt"] > 3 * 86400:
+            return None
+        ep = s["episode"]
+        return {"text": f'📺 قسمت <b>{ep}</b> انیمه وان‌پیس پخش شد!\n\n'
+                        f'🔗 <a href="https://anilist.co/anime/21">AniList</a>\n\n#OnePiece #وان_پیس',
+                "prio": 1, "image": s["media"]["coverImage"]["extraLarge"],
+                "keys": [f"ep:{ep}"]}
     except Exception:
-        pass
-    return None
+        return None
 
-def send(e):
-    summary = clean(e.get("summary", ""))[:300]
-    caption = f"📰 {e.title}\n\n{summary}\n\n🔗 {e.link}\n\n#OnePiece #وان_پیس"[:1000]
-    img = get_image(e)
+def send(it):
     base = f"https://api.telegram.org/bot{TOKEN}"
+    img = it.get("image") or (get_image(it["e"]) if it.get("e") else None)
     if img:
-        r = requests.post(f"{base}/sendPhoto",
-                          data={"chat_id": CHANNEL, "photo": img, "caption": caption})
+        r = requests.post(f"{base}/sendPhoto", timeout=30, data={
+            "chat_id": CHANNEL, "photo": img, "caption": it["text"], "parse_mode": "HTML"})
         if r.ok:
             return True
-    r = requests.post(f"{base}/sendMessage", data={"chat_id": CHANNEL, "text": caption})
+    r = requests.post(f"{base}/sendMessage", timeout=30, data={
+        "chat_id": CHANNEL, "text": it["text"], "parse_mode": "HTML",
+        "link_preview_options": json.dumps({"is_disabled": True})})
     return r.ok
 
 seen = set(json.load(open(SEEN_FILE))) if os.path.exists(SEEN_FILE) else set()
-items = []
-for url in FEEDS:
-    for e in feedparser.parse(url).entries:
-        txt = (e.title + " " + e.get("summary", "")).lower()
-        if KEYWORD in txt and e.link not in seen:
-            items.append(e)
+now = datetime.now(ZoneInfo("Asia/Tehran"))
+items = birthday_items(now)
+ep = episode_item()
+if ep:
+    items.append(ep)
 
-for e in items[:MAX_POSTS]:
-    if send(e):
-        seen.add(e.link)
+queued = set()
+for url, need_kw, force in FEEDS:
+    for e in load(url):
+        tl = e.title.lower()
+        key_t = "t:" + re.sub(r"\W+", "", tl)[:80]
+        if e.link in seen or key_t in seen or key_t in queued:
+            continue
+        if need_kw and "one piece" not in tl and "onepiece" not in tl:
+            continue
+        if any(b in tl for b in BLOCK) or not fresh(e):
+            continue
+        queued.add(key_t)
+        items.append(news_item(e, force))
+
+items = [i for i in items if not any(k in seen for k in i["keys"])]
+items.sort(key=lambda x: x["prio"])
+
+for it in items[:MAX_POSTS]:
+    if send(it):
+        seen.update(it["keys"])
 
 json.dump(list(seen), open(SEEN_FILE, "w"))
