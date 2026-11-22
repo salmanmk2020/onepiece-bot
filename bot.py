@@ -1,5 +1,6 @@
 import feedparser, requests, json, os, re, time, calendar, html
 from datetime import datetime
+from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
@@ -7,22 +8,19 @@ from bs4 import BeautifulSoup
 TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL = os.environ["CHANNEL_ID"]
 MAX_POSTS = 1
+REQUIRE_IMAGE = True
 SEEN_FILE = "seen.json"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; OnePieceNewsBot/1.0)"}
 
-GN = "https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q="
 FEEDS = [
     ("https://www.animenewsnetwork.com/all/rss.xml", True, None),
     ("https://myanimelist.net/rss/news.xml", True, None),
+    ("https://animecorner.me/tag/one-piece/feed/", False, None),
     ("https://animecorner.me/feed/", True, None),
-    ("https://animecorner.me/tag/one-piece/feed/", True, None),
     ("https://cr-news-api-service.prd.crunchyroll.com/v1/en-US/rss", True, None),
     ("https://www.cbr.com/feed/", True, None),
-    (GN + "%22One+Piece%22+chapter+when:7d", True, None),
-    (GN + "%22One+Piece%22+episode+when:7d", True, None),
-    (GN + "%22One+Piece%22+volume+when:14d", True, None),
-    (GN + "%22One+Piece%22+official+visual+OR+illustration+when:14d", True, None),
-    (GN + "%22One+Piece%22+spoilers+OR+leaks+when:7d", True, None),
+    ("https://screenrant.com/feed/", True, None),
+    ("https://otakuusamagazine.com/feed/", True, None),
     ("https://www.reddit.com/r/OnePiece/search.rss?q=flair%3ASpoilers&restrict_sr=on&sort=new&t=week", False, "spoiler"),
 ]
 
@@ -68,6 +66,14 @@ def fresh(e, days=3):
     return (not t) or (time.time() - calendar.timegm(t) < days * 86400)
 
 
+def is_dup(k, pool):
+    for p in pool:
+        sm = SequenceMatcher(None, k, p)
+        if sm.real_quick_ratio() > 0.8 and sm.quick_ratio() > 0.8 and sm.ratio() > 0.8:
+            return True
+    return False
+
+
 def load(url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=20)
@@ -91,7 +97,7 @@ def get_image(e):
     m = re.search(r'<img[^>]+src="([^"]+)"', e.get("summary", ""))
     if m:
         return m.group(1)
-    if "news.google.com" in e.link or "reddit.com" in e.link:
+    if "reddit.com" in e.link:
         return None
     try:
         r = requests.get(e.link, headers=HEADERS, timeout=10)
@@ -104,9 +110,7 @@ def get_image(e):
 
 
 def source_label(e):
-    src = e.get("source")
-    name = src.get("title") if isinstance(src, dict) else None
-    return name or urlparse(e.link).netloc.replace("www.", "")
+    return urlparse(e.link).netloc.replace("www.", "")
 
 
 def news_item(e, force):
@@ -114,9 +118,8 @@ def news_item(e, force):
     label, spoiler, prio = categorize(title)
     if force == "spoiler":
         label, spoiler, prio = CATS[0][1], True, 7
-    summary = clean(e.get("summary", ""))[:250]
-    if ("reddit.com" in e.link or "news.google.com" in e.link
-            or summary.lower().startswith(title.lower()[:30])):
+    summary = clean(e.get("summary", ""))[:350]
+    if "reddit.com" in e.link or summary.lower().startswith(title.lower()[:30]):
         summary = ""
     if spoiler:
         t = "<tg-spoiler>" + esc(title) + "</tg-spoiler>"
@@ -131,8 +134,11 @@ def news_item(e, force):
     text += ('\n🔗 <a href="' + html.escape(e.link) + '">' + esc(source_label(e)) + "</a>"
              + "\n\n#OnePiece #وان_پیس")
     key_t = "t:" + re.sub(r"\W+", "", title.lower())[:80]
-    return {"text": text[:1000], "prio": prio, "spoiler": spoiler,
-            "e": e, "keys": [e.link, key_t]}
+    keys = [e.link, key_t]
+    m = re.search(r"chapter\s*(\d{3,4})", title.lower())
+    if m:
+        keys.append("c:%s:%s" % (m.group(1), label))
+    return {"text": text, "prio": prio, "spoiler": spoiler, "e": e, "keys": keys}
 
 
 def birthday_items(now):
@@ -166,9 +172,8 @@ def episode_item():
         return None
 
 
-def send(it):
+def send(it, img):
     base = "https://api.telegram.org/bot" + TOKEN
-    img = it.get("image") or (get_image(it["e"]) if it.get("e") else None)
     if img:
         r = requests.post(base + "/sendPhoto", timeout=30, data={
             "chat_id": CHANNEL, "photo": img,
@@ -192,25 +197,38 @@ if ep:
     items.append(ep)
 
 queued = set()
+pool = [s for s in seen if s.startswith("t:")]
 for url, need_kw, force in FEEDS:
     for e in load(url):
         tl = e.title.lower()
-        key_t = "t:" + re.sub(r"\W+", "", tl)[:80]
-        if e.link in seen or key_t in seen or key_t in queued:
-            continue
         if need_kw and "one piece" not in tl and "onepiece" not in tl:
             continue
         if any(b in tl for b in BLOCK) or not fresh(e):
             continue
-        queued.add(key_t)
-        items.append(news_item(e, force))
+        it = news_item(e, force)
+        if any(k in seen or k in queued for k in it["keys"]):
+            continue
+        if is_dup(it["keys"][1], pool):
+            continue
+        queued.update(it["keys"])
+        pool.append(it["keys"][1])
+        items.append(it)
 
 items = [i for i in items if not any(k in seen for k in i["keys"])]
 items.sort(key=lambda x: x["prio"])
 print("تعداد خبر آماده:", len(items))
 
-for it in items[:MAX_POSTS]:
-    if send(it):
+posted = 0
+tries = 0
+for it in items:
+    if posted >= MAX_POSTS or tries >= 12:
+        break
+    tries += 1
+    img = it.get("image") or (get_image(it["e"]) if it.get("e") else None)
+    if REQUIRE_IMAGE and not img and it["prio"] >= 2:
+        continue
+    if send(it, img):
         seen.update(it["keys"])
+        posted += 1
 
 json.dump(list(seen), open(SEEN_FILE, "w"))
