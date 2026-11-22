@@ -2,26 +2,30 @@ import feedparser, requests, json, os, re, time, calendar, html
 from datetime import datetime
 from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup
 
 TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL = os.environ["CHANNEL_ID"]
 MAX_POSTS = 1
 REQUIRE_IMAGE = True
+FALLBACK_NO_IMAGE = True
 SEEN_FILE = "seen.json"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; OnePieceNewsBot/1.0)"}
 
+BING = "https://www.bing.com/news/search?format=rss&setlang=en-US&q="
+GN = "https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q="
 FEEDS = [
+    (BING + "%22One+Piece%22+manga+chapter", True, None),
+    (BING + "%22One+Piece%22+anime+episode", True, None),
+    (BING + "%22One+Piece%22+spoilers+leaks", True, None),
+    (BING + "%22One+Piece%22+official+visual+illustration", True, None),
+    (BING + "%22One+Piece%22+volume+release", True, None),
+    ("https://animecorner.me/?s=one+piece&feed=rss2", True, None),
     ("https://www.animenewsnetwork.com/all/rss.xml", True, None),
     ("https://myanimelist.net/rss/news.xml", True, None),
-    ("https://animecorner.me/tag/one-piece/feed/", True, None),
-    ("https://animecorner.me/feed/", True, None),
-    ("https://cr-news-api-service.prd.crunchyroll.com/v1/en-US/rss", True, None),
-    ("https://www.cbr.com/feed/", True, None),
-    ("https://screenrant.com/feed/", True, None),
-    ("https://otakuusamagazine.com/feed/", True, None),
-    ("https://www.reddit.com/r/OnePiece/search.rss?q=flair%3ASpoilers&restrict_sr=on&sort=new&t=week", False, "spoiler"),
+    (GN + "%22One+Piece%22+chapter+when:7d", True, None),
+    (GN + "%22One+Piece%22+episode+when:7d", True, None),
 ]
 
 BLOCK = ["live action", "live-action", "netflix", "cosplay", "giveaway",
@@ -78,10 +82,21 @@ def is_dup(k, pool):
     return False
 
 
+def real_link(link):
+    if "bing.com/news/apiclick" in link:
+        q = parse_qs(urlparse(link).query)
+        if q.get("url"):
+            return q["url"][0]
+    return link
+
+
 def load(url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=20)
         entries = feedparser.parse(r.content).entries
+        for e in entries:
+            if e.get("link"):
+                e["link"] = real_link(e["link"])
         print("FEED", r.status_code, len(entries), url[:70])
         return entries
     except Exception as ex:
@@ -90,11 +105,6 @@ def load(url):
 
 
 def get_image(e):
-    if "reddit.com" in e.link:
-        raw = html.unescape(e.get("summary", ""))
-        m = re.search(r'https://(?:i|preview)\.redd\.it/[^"\s<>]+', raw)
-        if m:
-            return m.group(0)
     for key in ("media_content", "media_thumbnail"):
         if e.get(key):
             return e[key][0].get("url")
@@ -104,16 +114,15 @@ def get_image(e):
     m = re.search(r'<img[^>]+src="([^"]+)"', e.get("summary", ""))
     if m:
         return m.group(1)
-    if "reddit.com" in e.link:
-        return None
-    try:
-        r = requests.get(e.link, headers=HEADERS, timeout=10)
-        tag = BeautifulSoup(r.text, "html.parser").find("meta", property="og:image")
-        if tag and tag.get("content"):
-            return tag["content"]
-    except Exception:
-        pass
-    return None
+    if "news.google.com" not in e.link:
+        try:
+            r = requests.get(e.link, headers=HEADERS, timeout=10)
+            tag = BeautifulSoup(r.text, "html.parser").find("meta", property="og:image")
+            if tag and tag.get("content"):
+                return tag["content"]
+        except Exception:
+            pass
+    return e.get("news_image")
 
 
 def source_label(e):
@@ -126,7 +135,7 @@ def news_item(e, force):
     if force == "spoiler":
         label, spoiler, prio = CATS[0][1], True, 7
     summary = clean(e.get("summary", ""))[:350]
-    if "reddit.com" in e.link or summary.lower().startswith(title.lower()[:30]):
+    if "news.google.com" in e.link or summary.lower().startswith(title.lower()[:30]):
         summary = ""
     if spoiler:
         t = "<tg-spoiler>" + esc(title) + "</tg-spoiler>"
@@ -215,12 +224,8 @@ for url, need_kw, force in FEEDS:
             continue
         tl = e.title.lower()
         summ = clean(e.get("summary", "")).lower()
-        if force == "spoiler":
-            relevant = ("/r/onepiece/" in e.link.lower()
-                        and re.search(r"spoiler|chapter|\b1[0-2]\d{2}\b", tl))
-        else:
-            relevant = (re.search(r"one\s?piece", tl)
-                        or len(re.findall(r"one\s?piece", summ)) >= 2)
+        relevant = (re.search(r"one\s?piece", tl)
+                    or len(re.findall(r"one\s?piece", summ)) >= 2)
         if not relevant:
             st["irrelevant"] += 1
             continue
@@ -242,17 +247,27 @@ items.sort(key=lambda x: x["prio"])
 print("تعداد خبر آماده:", len(items))
 
 posted = 0
-tries = 0
-for it in items:
-    if posted >= MAX_POSTS or tries >= 12:
+noimg = []
+for it in items[:15]:
+    if posted >= MAX_POSTS:
         break
-    tries += 1
     img = it.get("image") or (get_image(it["e"]) if it.get("e") else None)
     if REQUIRE_IMAGE and not img and it["prio"] >= 2:
-        print("بدون عکس رد شد:", it["keys"][0][:80])
+        noimg.append(it)
+        print("بدون عکس:", it["keys"][0][:80])
         continue
     if send(it, img):
         seen.update(it["keys"])
         posted += 1
+
+if posted == 0 and FALLBACK_NO_IMAGE:
+    for it in noimg:
+        if it["spoiler"]:
+            continue
+        if send(it, None):
+            seen.update(it["keys"])
+            posted += 1
+        if posted >= MAX_POSTS:
+            break
 
 json.dump(list(seen), open(SEEN_FILE, "w"))
