@@ -1,4 +1,113 @@
-if ("reddit.com" in e.link or "news.google.com" in e.link
+import feedparser, requests, json, os, re, time, calendar, html
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from urllib.parse import urlparse
+from bs4 import BeautifulSoup
+
+TOKEN = os.environ["BOT_TOKEN"]
+CHANNEL = os.environ["CHANNEL_ID"]
+MAX_POSTS = 1
+SEEN_FILE = "seen.json"
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; OnePieceNewsBot/1.0)"}
+
+GN = "https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q="
+FEEDS = [
+    ("https://www.animenewsnetwork.com/all/rss.xml", True, None),
+    ("https://myanimelist.net/rss/news.xml", True, None),
+    ("https://animecorner.me/feed/", True, None),
+    (GN + "%22One+Piece%22+chapter+when:7d", True, None),
+    (GN + "%22One+Piece%22+episode+when:7d", True, None),
+    (GN + "%22One+Piece%22+volume+when:14d", True, None),
+    (GN + "%22One+Piece%22+official+visual+OR+illustration+when:14d", True, None),
+    (GN + "%22One+Piece%22+spoilers+OR+leaks+when:7d", True, None),
+    ("https://www.reddit.com/r/OnePiece/search.rss?q=flair%3ASpoilers&restrict_sr=on&sort=new&t=week", False, "spoiler"),
+]
+
+BLOCK = ["live action", "live-action", "netflix", "cosplay", "giveaway",
+         "deals", "on sale", "amazon", "funko"]
+
+CATS = [
+    (["spoiler", "leak", "raw scan", "raws"], "🚨 اسپویل / لیک", True),
+    (["visual", "poster", "illustration", "key art", "cover art", "artwork"], "🎨 تصویر رسمی", False),
+    (["chapter", "manga", "volume", "tankobon", "jump"], "📖 مانگا", False),
+    (["episode", "anime", "trailer", "season", "arc", "movie"], "📺 انیمه", False),
+]
+
+BDAYS = {
+    (1, 1): ["ایس"], (1, 9): ["میهاوک"], (1, 10): ["یوستاس کید"],
+    (2, 2): ["ویوی"], (2, 6): ["نیکو رابین"], (3, 2): ["سنجی"],
+    (3, 9): ["فرانکی", "شنکس"], (3, 20): ["سابو"], (4, 1): ["اوسوپ"],
+    (4, 2): ["جینبی"], (4, 3): ["بروک"], (4, 6): ["ریش‌سفید"],
+    (5, 5): ["مانکی دی. لوفی"], (7, 3): ["نامی"], (8, 8): ["باگی"],
+    (9, 2): ["بوآ هنکاک"], (10, 6): ["ترافالگار لا"],
+    (11, 11): ["رورونوآ زورو"], (12, 24): ["چاپر"], (12, 31): ["گل دی. راجر"],
+}
+
+
+def esc(s):
+    return html.escape(s or "", quote=False)
+
+
+def clean(h):
+    return BeautifulSoup(h or "", "html.parser").get_text(" ", strip=True)
+
+
+def categorize(title):
+    t = title.lower()
+    for i, (words, label, sp) in enumerate(CATS):
+        if any(w in t for w in words):
+            return label, sp, i + 2
+    return "📰 خبر", False, 6
+
+
+def fresh(e, days=3):
+    t = e.get("published_parsed") or e.get("updated_parsed")
+    return (not t) or (time.time() - calendar.timegm(t) < days * 86400)
+
+
+def load(url):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20)
+        return feedparser.parse(r.content).entries
+    except Exception:
+        return []
+
+
+def get_image(e):
+    for key in ("media_content", "media_thumbnail"):
+        if e.get(key):
+            return e[key][0].get("url")
+    for enc in e.get("enclosures", []):
+        if enc.get("type", "").startswith("image"):
+            return enc.get("href")
+    m = re.search(r'<img[^>]+src="([^"]+)"', e.get("summary", ""))
+    if m:
+        return m.group(1)
+    if "news.google.com" in e.link or "reddit.com" in e.link:
+        return None
+    try:
+        r = requests.get(e.link, headers=HEADERS, timeout=10)
+        tag = BeautifulSoup(r.text, "html.parser").find("meta", property="og:image")
+        if tag and tag.get("content"):
+            return tag["content"]
+    except Exception:
+        pass
+    return None
+
+
+def source_label(e):
+    src = e.get("source")
+    name = src.get("title") if isinstance(src, dict) else None
+    return name or urlparse(e.link).netloc.replace("www.", "")
+
+
+def news_item(e, force):
+    title = e.title.strip()
+    label, spoiler, prio = categorize(title)
+    if force == "spoiler":
+        label, spoiler, prio = CATS[0][1], True, 2
+    summary = clean(e.get("summary", ""))[:250]
+    if ("reddit.com" in e.link or "news.google.com" in e.link
             or summary.lower().startswith(title.lower()[:30])):
         summary = ""
     if spoiler:
