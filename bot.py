@@ -15,7 +15,7 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; OnePieceNewsBot/1.0)"}
 FEEDS = [
     ("https://www.animenewsnetwork.com/all/rss.xml", True, None),
     ("https://myanimelist.net/rss/news.xml", True, None),
-    ("https://animecorner.me/tag/one-piece/feed/", False, None),
+    ("https://animecorner.me/tag/one-piece/feed/", True, None),
     ("https://animecorner.me/feed/", True, None),
     ("https://cr-news-api-service.prd.crunchyroll.com/v1/en-US/rss", True, None),
     ("https://www.cbr.com/feed/", True, None),
@@ -25,7 +25,8 @@ FEEDS = [
 ]
 
 BLOCK = ["live action", "live-action", "netflix", "cosplay", "giveaway",
-         "deals", "on sale", "amazon", "funko"]
+         "deals", "on sale", "amazon", "funko", "top 10", "top 5",
+         "best anime", "anime like", "ranked", "quiz", "meme"]
 
 CATS = [
     (["spoiler", "leak", "raw scan", "raws"], "🚨 اسپویل / لیک", True),
@@ -206,7 +207,10 @@ for url, need_kw, force in FEEDS:
         if not e.get("title") or not e.get("link"):
             continue
         tl = e.title.lower()
-        if need_kw and "one piece" not in tl and "onepiece" not in tl:
+        if force == "spoiler":
+            if "/r/onepiece/" not in e.link.lower() or not re.search(r"spoiler|chapter|\b1[0-2]\d{2}\b", tl):
+                continue
+        elif not re.search(r"one\s?piece", tl):
             continue
         if any(b in tl for b in BLOCK) or not fresh(e):
             continue
